@@ -1,0 +1,4 @@
+src/exlcm_example_t.c
+src/main.zig
+/zig-cache/
+/zig-out/
