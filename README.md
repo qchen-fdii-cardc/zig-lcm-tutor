@@ -127,15 +127,146 @@ zig build run
 
 后台的输出很快就出现了：
 
- >Received message on channel "EXAMPLE"
- >  timestamp   = 1681904615426
- >  position    = (19.0, 2.0, 3.0)
- >  orientation = (19.0, 0.0, 0.0, 0.0)
- >  ranges: (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
- >  name        = 'publish batch:        +18 th.'
- >  enabled     = True
+```
+ Received message on channel "EXAMPLE"
+   timestamp   = 1681904615426
+   position    = (19.0, 2.0, 3.0)
+   orientation = (19.0, 0.0, 0.0, 0.0)
+   ranges: (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+   name        = 'publish batch:        +18 th.'
+   enabled     = True
+```
 
 与Zig程序中的逻辑一致。
+
+# 进一步的改进：增加一个LCM的Zig语言的Listener
+考虑一下，利用原来的Python语言的Listener还不够好，我们增加一个ZIG语言的Listener。
+
+
+1. 增加一个处理exlcm.example_t的函数
+2. 增加一个线程执行LCM的监听函数
+3. 在主程序启动线程
+4. 增加最终发送“SHUTDOWN”消息的逻辑
+
+
+```zig
+// 一个简单的lcm接收函数
+fn my_handler(rbuf: [*c]const l.lcm_recv_buf_t, channel: [*c]const u8, msg_: [*c]const l.exlcm_example_t, usr: ?*anyopaque) callconv(.C) void {
+    _ = usr;
+    _ = rbuf;
+
+    const msg = msg_.*;
+    std.debug.print("Received message on channel {s}\n", .{channel});
+    std.debug.print("  timestamp   = {}\n", .{msg.timestamp});
+    std.debug.print("  position    = {any}\n", .{msg.position});
+    std.debug.print("  orientation = {any}\n", .{msg.orientation});
+    std.debug.print("  ranges      = {any}\n", .{msg.ranges[0..@intCast(usize, msg.num_ranges)]});
+    std.debug.print("  name        = '{s}'\n", .{msg.name});
+    std.debug.print("  enabled     = {}\n\n", .{msg.enabled});
+
+    // cast to [*c]u8 to []u8 and test msg.name start with "SHUTDOWN"
+    if (std.mem.startsWith(u8, std.mem.sliceTo(msg.name, 0), "SHUTDOWN")) {
+        std.debug.print("Shutting down...\n", .{});
+        std.os.exit(0);
+    }
+}
+
+// 一个简单的lcm接收线程
+fn lcm_loop() void {
+    var lcm = l.lcm_create(null);
+    defer l.lcm_destroy(lcm);
+
+    _ = l.exlcm_example_t_subscribe(lcm, "EXAMPLE", &my_handler, null);
+    while (true) {
+        _ = l.lcm_handle(lcm);
+    }
+}
+
+// zig的main函数
+pub fn main() !void {
+    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
+    var lcm = l.lcm_create(null);
+    defer l.lcm_destroy(lcm);
+
+    // define a thread to handle lcm
+    var lcm_thread = try std.Thread.spawn(.{}, lcm_loop, .{});
+    defer lcm_thread.join();
+
+    // 两种不同的定义方法
+    // var ranges: [18]i16 = undefined;
+    var ranges = [_]i16{0} ** 18;
+    inline for (&ranges, 0..) |*r, i| {
+        r.* = @intCast(i16, i + 1);
+    }
+
+    // 定义一个结构体：
+    var data = l.exlcm_example_t{
+        .timestamp = std.time.milliTimestamp(),
+        .position = .{ 1, 2, 3 },
+        .orientation = .{ 1, 0, 0, 0 },
+        .num_ranges = ranges.len,
+        .enabled = 1,
+        .ranges = &ranges,
+        .name = @constCast("message string from zig!"),
+    };
+    var allocator = std.heap.page_allocator;
+
+    // 更新参数，持续发送，间隔时间100毫秒
+    for (ranges) |r| {
+        // std.debug.print("{}", .{r});
+        data.timestamp = std.time.milliTimestamp();
+        data.position[0] += 1;
+        data.orientation[0] += 1;
+        data.name = @constCast(std.fmt.allocPrintZ(allocator, "publish batch: {d:>10} th.", .{r}) catch "string allocation error.");
+
+        _ = l.exlcm_example_t_publish(lcm, "EXAMPLE", &data);
+        // std.debug.print("ziglcm_example_t_publish -> {}\n", .{ret});
+        std.time.sleep(std.time.ns_per_ms * 100);
+    }
+
+    data.name = @constCast("SHUTDOWN");
+    _ = l.exlcm_example_t_publish(lcm, "EXAMPLE", &data);
+}
+```
+
+这里面最值得注意的几行代码是：
+
+```zig
+    // 值得注意的地方之一
+    std.debug.print("  ranges      = {any}\n", .{msg.ranges[0..@intCast(usize, msg.num_ranges)]});
+
+    // 值得注意的地方之二
+    if (std.mem.startsWith(u8, std.mem.sliceTo(msg.name, 0), "SHUTDOWN")) {
+        std.debug.print("Shutting down...\n", .{});
+        std.os.exit(0);
+    }
+```
+
+前者是从C语言的数组转换到Zig语言的数组，后者是从Zig语言的字符串转换到C语言的字符串。可以看到这里的逻辑都是从一个不同类型的array转换到一个slice。前者是按照长度来构造slice，后者是按照字符串的结束符`0:u8`来构造slice。
+
+其他代码都非常直观，运行`zig build run`就可以看到效果了。
+
+```
+Received message on channel EXAMPLE
+  timestamp   = 1681934219972
+  position    = { 1.9e+01, 2.0e+00, 3.0e+00 }
+  orientation = { 1.9e+01, 0.0e+00, 0.0e+00, 0.0e+00 }
+  ranges      = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }
+  name        = 'publish batch:        +18 th.'
+  enabled     = 1
+
+Received message on channel EXAMPLE
+  timestamp   = 1681934219972
+  position    = { 1.9e+01, 2.0e+00, 3.0e+00 }
+  orientation = { 1.9e+01, 0.0e+00, 0.0e+00, 0.0e+00 }
+  ranges      = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }
+  name        = 'SHUTDOWN'
+  enabled     = 1
+
+Shutting down...
+```
+
+如果运行`zig build run & zig build run`，也就是同时运行两个，结果就很fun，因为两个都相互发，相互收……好乱。
 
 # 结论
 
