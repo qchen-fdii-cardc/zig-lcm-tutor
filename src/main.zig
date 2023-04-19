@@ -16,7 +16,8 @@ fn my_handler(rbuf: [*c]const l.lcm_recv_buf_t, channel: [*c]const u8, msg_: [*c
     std.debug.print("  position    = {any}\n", .{msg.position});
     std.debug.print("  orientation = {any}\n", .{msg.orientation});
     std.debug.print("  ranges      = {any}\n", .{msg.ranges[0..@intCast(usize, msg.num_ranges)]});
-    std.debug.print("  name        = '{s}'\n\n", .{msg.name});
+    std.debug.print("  name        = '{s}'\n", .{msg.name});
+    std.debug.print("  enabled     = {}\n\n", .{msg.enabled});
 
     // cast to [*c]u8 to []u8 and test msg.name start with "SHUTDOWN"
     if (std.mem.startsWith(u8, std.mem.sliceTo(msg.name, 0), "SHUTDOWN")) {
